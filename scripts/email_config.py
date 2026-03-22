@@ -68,29 +68,23 @@ PRIORITIES = {
 # ── Email Categories (for fan-out diversity) ───────────────────────
 
 CATEGORIES = [
-    "work_request",
+    "todo_tasks",
     "meeting_coordination",
-    "client_communication",
-    "hr_admin",
-    "newsletter_digest",
-    "automated_notification",
-    "personal",
+    "newsletter_information",
+    "important_alert",
+    "general",
     "transactional",
-    "escalation_incident",
-    "feedback_review",
+    "jobs",
 ]
 
 CATEGORY_DESCRIPTIONS = {
-    "work_request": "Direct asks to do something — tasks, deliverables, approvals",
+    "todo_tasks": "Direct asks to do something — tasks, deliverables, approvals",
     "meeting_coordination": "Scheduling, rescheduling, agenda sharing, meeting follow-ups",
-    "client_communication": "External client or partner correspondence",
-    "hr_admin": "HR announcements, policy updates, benefits, onboarding",
-    "newsletter_digest": "Internal or external newsletters, digests, roundups",
-    "automated_notification": "CI/CD, monitoring, bot alerts, system notifications",
-    "personal": "Personal emails landing in work inbox — family, friends, side projects",
-    "transactional": "Receipts, order confirmations, password resets, subscription notices",
-    "escalation_incident": "Incident reports, escalations, outage comms, security alerts",
-    "feedback_review": "Performance reviews, code reviews, 360 feedback, survey requests",
+    "newsletter_information": "Internal or external newsletters, digests, roundups",
+    "important_alert": "Notifications related to immediate actions, ie security codes, urgent checks for new logins etc, password resets",
+    "general": "Personal emails landing in work inbox — family, friends, side projects",
+    "transactional": "Receipts, order confirmations, subscription notices",
+    "jobs": "Job related emails, updates, offers notifications",
 }
 
 # ── Target distribution per priority ──────────────────────────────
@@ -181,12 +175,9 @@ Classify this email's priority:
 
 # ── Model Configuration ───────────────────────────────────────────
 
-# Models to try in order (Prime Intellect free inference)
 MODEL_PRIORITY = [
-    "qwen/qwen3-235b-a22b-thinking-2507",
-    "google/gemini-2.5-pro",
-    "moonshotai/kimi-k2-0905",
+    "qwen/qwen3-32b",
 ]
 
-API_BASE_URL = "https://api.pinference.ai/api/v1"
-API_KEY_ENV = "PRIME_API_KEY"
+API_BASE_URL = "https://api.groq.com/openai/v1"
+API_KEY_ENV = "GROQ_API_KEY"

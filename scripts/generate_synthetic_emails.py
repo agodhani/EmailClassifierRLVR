@@ -47,7 +47,7 @@ from email_config import (
 
 # ── Globals ────────────────────────────────────────────────────────
 
-MAX_CONCURRENT = 10  # semaphore limit for API calls
+MAX_CONCURRENT = 2  # semaphore limit for API calls (Groq free tier: ~30 RPM)
 MAX_RETRIES = 3
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data"
 GMAIL_RAW_DIR = Path(__file__).resolve().parent.parent / "email-data-raw"
@@ -126,27 +126,18 @@ def get_fewshot_examples(gmail_seeds: list[dict], priority: str, n: int = 2) -> 
     samples = random.sample(matching, min(n, len(matching)))
     lines = ["\n\nHere are real email examples at this priority level for reference:"]
     for i, s in enumerate(samples, 1):
-        # Truncate to avoid huge prompts
-        text = s["email_text"][:500]
+        # Truncate to avoid huge prompts and token limits
+        text = s["email_text"][:300]
         lines.append(f"\n--- Example {i} ---\n{text}")
     return "\n".join(lines)
 
 
 def _resolve_api_key() -> str:
-    """Get API key from env var or Prime CLI config (~/.prime/config.json)."""
+    """Get API key from env var."""
     key = os.environ.get(API_KEY_ENV)
     if key:
         return key
-    config_path = Path.home() / ".prime" / "config.json"
-    if config_path.exists():
-        with open(config_path) as f:
-            config = json.load(f)
-        key = config.get("api_key")
-        if key:
-            return key
-    print(
-        f"Error: No API key found. Either set {API_KEY_ENV} or run `prime login`."
-    )
+    print(f"Error: {API_KEY_ENV} environment variable not set.")
     sys.exit(1)
 
 
@@ -161,7 +152,7 @@ async def call_llm(
     sem: asyncio.Semaphore,
     model_idx: int = 0,
 ) -> str | None:
-    """Call LLM with retry and model fallback."""
+    """Call LLM with retry and rate-limit backoff."""
     model = MODEL_PRIORITY[model_idx]
     for attempt in range(MAX_RETRIES):
         try:
@@ -177,15 +168,24 @@ async def call_llm(
                 )
             content = resp.choices[0].message.content
             if content:
-                return content.strip()
+                # Strip Qwen thinking traces
+                content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL)
+                content = content.strip()
+                if content:
+                    return content
         except Exception as e:
             err = str(e)
-            # Rate limited or model unavailable — try next model
-            if ("429" in err or "503" in err) and model_idx + 1 < len(MODEL_PRIORITY):
+            if "429" in err:
+                # Rate limited — wait longer, then retry same model
+                wait = 15 * (attempt + 1)
+                print(f"  Rate limited, waiting {wait}s before retry {attempt+1}/{MAX_RETRIES}...")
+                await asyncio.sleep(wait)
+            elif ("402" in err or "503" in err) and model_idx + 1 < len(MODEL_PRIORITY):
                 return await call_llm(client, system, user, sem, model_idx + 1)
-            wait = 2 ** (attempt + 1)
-            print(f"  Retry {attempt+1}/{MAX_RETRIES} for {model} ({err[:80]}), waiting {wait}s")
-            await asyncio.sleep(wait)
+            else:
+                wait = 2 ** (attempt + 1)
+                print(f"  Retry {attempt+1}/{MAX_RETRIES} for {model} ({err[:80]}), waiting {wait}s")
+                await asyncio.sleep(wait)
     return None
 
 
@@ -390,30 +390,27 @@ async def run_pipeline(
     if dry_run:
         print("DRY RUN — no emails will be generated\n")
 
-    batch_size = 5
     cells = [
         (cat, pri)
         for pri in PRIORITIES
         for cat in CATEGORIES
     ]
 
-    for i in range(0, len(cells), batch_size):
-        batch = cells[i : i + batch_size]
-        tasks = [
-            process_cell(
-                client, cat, pri, num_per_cell, sem, dry_run,
-                fewshot_block=fewshot_blocks.get(pri, ""),
-            )
-            for cat, pri in batch
-        ]
-        batch_results = await asyncio.gather(*tasks)
-        for res in batch_results:
-            all_results.extend(res)
-            done += 1
+    # Process one cell at a time to stay under Groq rate limits
+    for i, (cat, pri) in enumerate(cells):
+        results = await process_cell(
+            client, cat, pri, num_per_cell, sem, dry_run,
+            fewshot_block=fewshot_blocks.get(pri, ""),
+        )
+        all_results.extend(results)
+        done += 1
         print(
-            f"  Progress: {min(done + len(batch) - 1, total_cells)}/{total_cells} cells, "
+            f"  Progress: {done}/{total_cells} cells, "
             f"{len(all_results)} examples so far"
         )
+        # Pause between cells to stay under Groq rate limits
+        if i + 1 < len(cells):
+            await asyncio.sleep(15)
 
     elapsed = time.time() - start
 
