@@ -1,28 +1,27 @@
-
 #!/usr/bin/env python3
 """
 Synthetic email generation pipeline.
 
-Three-stage LLM pipeline:
-  1. Planner  — generates diverse scenario specs per (category × priority)
-  2. Generator — turns each spec into a realistic email
-  3. Validator — independently classifies; keeps only agreement examples
-
-Can ingest real Gmail exports from email-data-raw/ as seed examples that
-are included in the output and used as few-shots for more realistic generation.
+Two modes:
+  --gmail-only  : Run the validator LLM on every real Gmail email to assign
+                  a category label, then write the labeled dataset.
+  (default)     : Three-stage LLM pipeline:
+                    1. Planner   — generates diverse scenario specs per category
+                    2. Generator — turns each spec into a realistic email
+                    3. Validator — independently classifies; keeps only agreement examples
 
 Usage:
   python scripts/generate_synthetic_emails.py --num-per-cell 5 --dry-run
   python scripts/generate_synthetic_emails.py --num-per-cell 8
   python scripts/generate_synthetic_emails.py --seed-from-gmail           # include real emails
-  python scripts/generate_synthetic_emails.py --seed-from-gmail --gmail-only  # real emails only
+  python scripts/generate_synthetic_emails.py --gmail-only                # label real emails only
+  python scripts/generate_synthetic_emails.py --gmail-only --preview      # preview labels, no write
 """
 
 import argparse
 import asyncio
 import json
 import os
-import random
 import re
 import sys
 import time
@@ -40,7 +39,6 @@ from email_config import (
     MODEL_PRIORITY,
     PLANNER_SYSTEM,
     PLANNER_USER,
-    PRIORITIES,
     VALIDATOR_SYSTEM,
     VALIDATOR_USER,
 )
@@ -52,12 +50,12 @@ MAX_RETRIES = 3
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data"
 GMAIL_RAW_DIR = Path(__file__).resolve().parent.parent / "email-data-raw"
 
-# Folder name → priority mapping
-GMAIL_FOLDER_PRIORITY = {
-    "important_emails": "P1",
-    "job_emails": "P2",
-    "receipts_emails": "P3",
-    "noise_emails": "P4",
+# Folder name → expected category hints (informational only; validator assigns the final label)
+GMAIL_FOLDER_CATEGORY = {
+    "important_emails": ["important_alert", "todo_tasks"],
+    "job_emails": ["jobs"],
+    "receipts_emails": ["transactional"],
+    "noise_emails": ["newsletter_information", "transactional", "general"],
 }
 
 
@@ -82,14 +80,14 @@ def format_gmail_to_text(email: dict) -> str:
     return "\n".join(parts)
 
 
-def load_gmail_seeds() -> list[dict]:
-    """Load real Gmail exports from email-data-raw/ and format them."""
+def load_gmail_raw() -> list[dict]:
+    """Load raw Gmail emails from email-data-raw/, returning (email_text, folder, email_id)."""
     if not GMAIL_RAW_DIR.exists():
-        print(f"Warning: {GMAIL_RAW_DIR} not found, skipping Gmail seeds")
+        print(f"Warning: {GMAIL_RAW_DIR} not found, skipping Gmail data")
         return []
 
     results = []
-    for folder_name, priority in GMAIL_FOLDER_PRIORITY.items():
+    for folder_name in GMAIL_FOLDER_CATEGORY:
         folder = GMAIL_RAW_DIR / folder_name
         if not folder.exists():
             continue
@@ -102,34 +100,13 @@ def load_gmail_seeds() -> list[dict]:
                     continue  # skip empty/trivial
                 results.append({
                     "email_text": email_text,
-                    "priority": priority,
-                    "category": "gmail_real",
-                    "rationale": f"Real Gmail sample from {folder_name}/",
-                    "scenario_spec": {"source": "gmail", "id": email.get("id", "")},
+                    "folder": folder_name,
+                    "email_id": email.get("id", ""),
+                    "subject": email.get("subject", "(no subject)"),
                 })
 
-    print(f"Loaded {len(results)} real Gmail emails:")
-    pri_counts = {}
-    for r in results:
-        pri_counts[r["priority"]] = pri_counts.get(r["priority"], 0) + 1
-    for p in sorted(pri_counts):
-        print(f"  {p}: {pri_counts[p]}")
-
+    print(f"Loaded {len(results)} raw Gmail emails from {len(GMAIL_FOLDER_CATEGORY)} folders")
     return results
-
-
-def get_fewshot_examples(gmail_seeds: list[dict], priority: str, n: int = 2) -> str:
-    """Pick n real email examples for a priority to use as few-shots."""
-    matching = [s for s in gmail_seeds if s["priority"] == priority]
-    if not matching:
-        return ""
-    samples = random.sample(matching, min(n, len(matching)))
-    lines = ["\n\nHere are real email examples at this priority level for reference:"]
-    for i, s in enumerate(samples, 1):
-        # Truncate to avoid huge prompts and token limits
-        text = s["email_text"][:300]
-        lines.append(f"\n--- Example {i} ---\n{text}")
-    return "\n".join(lines)
 
 
 def _resolve_api_key() -> str:
@@ -176,7 +153,6 @@ async def call_llm(
         except Exception as e:
             err = str(e)
             if "429" in err:
-                # Rate limited — wait longer, then retry same model
                 wait = 15 * (attempt + 1)
                 print(f"  Rate limited, waiting {wait}s before retry {attempt+1}/{MAX_RETRIES}...")
                 await asyncio.sleep(wait)
@@ -194,28 +170,19 @@ async def call_llm(
 async def plan_scenarios(
     client: AsyncOpenAI,
     category: str,
-    priority: str,
     n: int,
     sem: asyncio.Semaphore,
-    fewshot_block: str = "",
 ) -> list[dict]:
-    """Generate n scenario specs for a (category, priority) cell."""
-    p = PRIORITIES[priority]
+    """Generate n scenario specs for a category."""
     user_msg = PLANNER_USER.format(
         n=n,
         category=category,
         category_desc=CATEGORY_DESCRIPTIONS[category],
-        priority=p["label"],
-        priority_desc=p["description"],
-        priority_examples=", ".join(p["examples"]),
     )
-    if fewshot_block:
-        user_msg += fewshot_block
     raw = await call_llm(client, PLANNER_SYSTEM, user_msg, sem)
     if not raw:
         return []
 
-    # Extract JSON array from response (handle markdown fences)
     raw = re.sub(r"```(?:json)?\s*", "", raw)
     raw = raw.strip().rstrip("`")
     try:
@@ -223,14 +190,13 @@ async def plan_scenarios(
         if isinstance(scenarios, list):
             return scenarios[:n]
     except json.JSONDecodeError:
-        # Try to find array in the response
         match = re.search(r"\[.*\]", raw, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group())[:n]
             except json.JSONDecodeError:
                 pass
-    print(f"  Warning: could not parse planner output for {category}/{priority}")
+    print(f"  Warning: could not parse planner output for {category}")
     return []
 
 
@@ -239,14 +205,13 @@ async def plan_scenarios(
 async def generate_email(
     client: AsyncOpenAI,
     category: str,
-    priority: str,
     scenario: dict,
     sem: asyncio.Semaphore,
 ) -> str | None:
     """Generate a single email from a scenario spec."""
     user_msg = GENERATOR_USER.format(
         category=category,
-        priority=priority,
+        category_desc=CATEGORY_DESCRIPTIONS[category],
         scenario_json=json.dumps(scenario, indent=2),
     )
     return await call_llm(client, GENERATOR_SYSTEM, user_msg, sem)
@@ -254,13 +219,16 @@ async def generate_email(
 
 # ── Stage 3: Validator ────────────────────────────────────────────
 
-def parse_priority_xml(text: str) -> tuple[str | None, str | None]:
-    """Extract priority and rationale from validator XML output."""
-    pri_match = re.search(r"<priority>\s*(P[1-4])\s*</priority>", text)
+def parse_category_xml(text: str) -> tuple[str | None, str | None]:
+    """Extract category and rationale from validator XML output."""
+    valid = set(CATEGORIES)
+    cat_match = re.search(r"<category>\s*(\w+)\s*</category>", text)
     rat_match = re.search(r"<rationale>(.*?)</rationale>", text, re.DOTALL)
-    priority = pri_match.group(1) if pri_match else None
+    category = cat_match.group(1).strip() if cat_match else None
+    if category and category not in valid:
+        category = None  # reject unknown categories
     rationale = rat_match.group(1).strip() if rat_match else None
-    return priority, rationale
+    return category, rationale
 
 
 async def validate_email(
@@ -268,30 +236,75 @@ async def validate_email(
     email_text: str,
     sem: asyncio.Semaphore,
 ) -> tuple[str | None, str | None]:
-    """Independently classify an email and return (priority, rationale)."""
+    """Classify an email into a category, returning (category, rationale)."""
     user_msg = VALIDATOR_USER.format(email_text=email_text)
     raw = await call_llm(client, VALIDATOR_SYSTEM, user_msg, sem)
     if not raw:
         return None, None
-    return parse_priority_xml(raw)
+    return parse_category_xml(raw)
 
 
-# ── Pipeline ──────────────────────────────────────────────────────
+# ── Gmail labeling mode ────────────────────────────────────────────
 
-async def process_cell(
+async def label_gmail_emails(preview: bool = False) -> list[dict]:
+    """Run validator LLM on every real Gmail email to assign category labels."""
+    raw_emails = load_gmail_raw()
+    if not raw_emails:
+        return []
+
+    client = get_client()
+    sem = asyncio.Semaphore(MAX_CONCURRENT)
+
+    print(f"\nClassifying {len(raw_emails)} emails into categories...")
+    if preview:
+        print("PREVIEW MODE — no file will be written\n")
+
+    # Validate all emails concurrently (within semaphore limit)
+    tasks = [validate_email(client, e["email_text"], sem) for e in raw_emails]
+    validations = await asyncio.gather(*tasks)
+
+    results = []
+    category_counts: dict[str, int] = {}
+    skipped = 0
+
+    for raw, (category, rationale) in zip(raw_emails, validations):
+        if not category:
+            print(f"  SKIP (no valid category): {raw['subject'][:60]}")
+            skipped += 1
+            continue
+        category_counts[category] = category_counts.get(category, 0) + 1
+        if preview:
+            hint = GMAIL_FOLDER_CATEGORY.get(raw["folder"], [])
+            hint_str = f" (folder hint: {hint})" if hint else ""
+            print(f"  [{category}]{hint_str}  {raw['subject'][:70]}")
+        results.append({
+            "email_text": raw["email_text"],
+            "category": category,
+            "rationale": rationale or "",
+            "scenario_spec": {"source": "gmail", "id": raw["email_id"]},
+        })
+
+    print(f"\nLabeled {len(results)} emails ({skipped} skipped — no valid category)")
+    print("Category distribution:")
+    for cat in CATEGORIES:
+        count = category_counts.get(cat, 0)
+        print(f"  {cat}: {count}")
+
+    return results
+
+
+# ── Synthetic generation pipeline ─────────────────────────────────
+
+async def process_category(
     client: AsyncOpenAI,
     category: str,
-    priority: str,
     num_scenarios: int,
     sem: asyncio.Semaphore,
     dry_run: bool = False,
-    fewshot_block: str = "",
 ) -> list[dict]:
-    """Process one (category, priority) cell through all 3 stages."""
-    print(f"  Planning {category} × {priority} ({num_scenarios} scenarios)...")
-    scenarios = await plan_scenarios(
-        client, category, priority, num_scenarios, sem, fewshot_block
-    )
+    """Process one category through all 3 stages."""
+    print(f"  Planning {category} ({num_scenarios} scenarios)...")
+    scenarios = await plan_scenarios(client, category, num_scenarios, sem)
     if not scenarios:
         return []
     print(f"    Got {len(scenarios)} scenarios")
@@ -300,7 +313,6 @@ async def process_cell(
         return [
             {
                 "email_text": f"[DRY RUN] Scenario: {json.dumps(s)[:100]}",
-                "priority": priority,
                 "category": category,
                 "rationale": "dry run",
                 "scenario_spec": s,
@@ -310,13 +322,9 @@ async def process_cell(
 
     results = []
 
-    # Generate emails concurrently
-    gen_tasks = [
-        generate_email(client, category, priority, s, sem) for s in scenarios
-    ]
+    gen_tasks = [generate_email(client, category, s, sem) for s in scenarios]
     emails = await asyncio.gather(*gen_tasks)
 
-    # Validate concurrently
     valid_pairs = [(s, e) for s, e in zip(scenarios, emails) if e]
     if not valid_pairs:
         return []
@@ -324,23 +332,16 @@ async def process_cell(
     val_tasks = [validate_email(client, e, sem) for _, e in valid_pairs]
     validations = await asyncio.gather(*val_tasks)
 
-    for (scenario, email_text), (val_priority, val_rationale) in zip(
-        valid_pairs, validations
-    ):
-        if val_priority == priority:
-            results.append(
-                {
-                    "email_text": email_text,
-                    "priority": priority,
-                    "category": category,
-                    "rationale": val_rationale or "",
-                    "scenario_spec": scenario,
-                }
-            )
+    for (scenario, email_text), (val_category, val_rationale) in zip(valid_pairs, validations):
+        if val_category == category:
+            results.append({
+                "email_text": email_text,
+                "category": category,
+                "rationale": val_rationale or "",
+                "scenario_spec": scenario,
+            })
         else:
-            print(
-                f"    Mismatch: expected {priority}, validator said {val_priority} — skipping"
-            )
+            print(f"    Mismatch: expected {category}, validator said {val_category} — skipping")
 
     return results
 
@@ -350,93 +351,67 @@ async def run_pipeline(
     dry_run: bool = False,
     seed_from_gmail: bool = False,
     gmail_only: bool = False,
+    preview: bool = False,
 ):
     """Run the full generation pipeline."""
     all_results = []
-    gmail_seeds = []
     start = time.time()
 
-    # ── Gmail ingestion ───────────────────────────────────────────
-    if seed_from_gmail or gmail_only:
-        gmail_seeds = load_gmail_seeds()
-        all_results.extend(gmail_seeds)
-        if gmail_only:
-            # Write output and exit — no synthetic generation
-            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-            out_path = OUTPUT_DIR / "synthetic_emails.jsonl"
-            with open(out_path, "w") as f:
-                for item in all_results:
-                    f.write(json.dumps(item) + "\n")
-            print(f"\nGmail-only mode: {len(all_results)} examples written to {out_path}")
+    # ── Gmail labeling mode ───────────────────────────────────────
+    if gmail_only:
+        labeled = await label_gmail_emails(preview=preview)
+        if preview:
             return
+        all_results.extend(labeled)
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        out_path = OUTPUT_DIR / "synthetic_emails.jsonl"
+        with open(out_path, "w") as f:
+            for item in all_results:
+                f.write(json.dumps(item) + "\n")
+        print(f"\nGmail-only mode: {len(all_results)} examples written to {out_path}")
+        return
+
+    # ── Seed real emails if requested ────────────────────────────
+    if seed_from_gmail:
+        labeled = await label_gmail_emails()
+        all_results.extend(labeled)
+        gmail_count = len(labeled)
+    else:
+        gmail_count = 0
 
     # ── Synthetic generation ──────────────────────────────────────
     client = get_client()
     sem = asyncio.Semaphore(MAX_CONCURRENT)
 
-    # Pre-compute few-shot blocks per priority
-    fewshot_blocks = {}
-    if gmail_seeds:
-        for pri in PRIORITIES:
-            fewshot_blocks[pri] = get_fewshot_examples(gmail_seeds, pri)
-
-    total_cells = len(CATEGORIES) * len(PRIORITIES)
-    done = 0
-
-    print(f"Starting pipeline: {total_cells} cells, {num_per_cell} scenarios each")
-    print(f"Model priority: {MODEL_PRIORITY}")
-    if gmail_seeds:
-        print(f"Using {len(gmail_seeds)} real Gmail emails as seeds + few-shots")
+    print(f"Starting pipeline: {len(CATEGORIES)} categories, {num_per_cell} scenarios each")
+    print(f"Model: {MODEL_PRIORITY}")
     if dry_run:
         print("DRY RUN — no emails will be generated\n")
 
-    cells = [
-        (cat, pri)
-        for pri in PRIORITIES
-        for cat in CATEGORIES
-    ]
-
-    # Process one cell at a time to stay under Groq rate limits
-    for i, (cat, pri) in enumerate(cells):
-        results = await process_cell(
-            client, cat, pri, num_per_cell, sem, dry_run,
-            fewshot_block=fewshot_blocks.get(pri, ""),
-        )
+    for i, category in enumerate(CATEGORIES):
+        results = await process_category(client, category, num_per_cell, sem, dry_run)
         all_results.extend(results)
-        done += 1
-        print(
-            f"  Progress: {done}/{total_cells} cells, "
-            f"{len(all_results)} examples so far"
-        )
-        # Pause between cells to stay under Groq rate limits
-        if i + 1 < len(cells):
+        print(f"  Progress: {i+1}/{len(CATEGORIES)} categories, {len(all_results)} examples so far")
+        if i + 1 < len(CATEGORIES):
             await asyncio.sleep(15)
 
     elapsed = time.time() - start
 
-    # Write output
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     out_path = OUTPUT_DIR / "synthetic_emails.jsonl"
     with open(out_path, "w") as f:
         for item in all_results:
             f.write(json.dumps(item) + "\n")
 
-    # Print summary
-    gmail_count = len(gmail_seeds)
     synth_count = len(all_results) - gmail_count
     print(f"\nDone in {elapsed:.1f}s")
     print(f"Total examples: {len(all_results)} ({gmail_count} real + {synth_count} synthetic)")
-    pri_counts = {}
+    cat_counts: dict[str, int] = {}
     for item in all_results:
-        pri_counts[item["priority"]] = pri_counts.get(item["priority"], 0) + 1
-    for p in sorted(pri_counts):
-        print(f"  {p}: {pri_counts[p]}")
+        cat_counts[item["category"]] = cat_counts.get(item["category"], 0) + 1
+    for cat in CATEGORIES:
+        print(f"  {cat}: {cat_counts.get(cat, 0)}")
     print(f"Output: {out_path}")
-
-    # Validation rate (synthetic only)
-    expected = len(cells) * num_per_cell
-    rate = synth_count / expected * 100 if expected else 0
-    print(f"Validation agreement rate: {rate:.1f}% ({synth_count}/{expected})")
 
 
 def main():
@@ -445,7 +420,7 @@ def main():
         "--num-per-cell",
         type=int,
         default=8,
-        help="Number of scenarios per (category × priority) cell (default: 8)",
+        help="Number of scenarios per category (default: 8)",
     )
     parser.add_argument(
         "--dry-run",
@@ -455,17 +430,26 @@ def main():
     parser.add_argument(
         "--seed-from-gmail",
         action="store_true",
-        help="Include real Gmail emails from email-data-raw/ and use as few-shots",
+        help="Include real Gmail emails (validator-labeled) and use them as seeds",
     )
     parser.add_argument(
         "--gmail-only",
         action="store_true",
-        help="Only ingest Gmail data, skip synthetic generation",
+        help="Only label Gmail data with the validator, skip synthetic generation",
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="With --gmail-only: print subject → category assignments without writing output",
     )
     args = parser.parse_args()
 
     asyncio.run(run_pipeline(
-        args.num_per_cell, args.dry_run, args.seed_from_gmail, args.gmail_only,
+        args.num_per_cell,
+        args.dry_run,
+        args.seed_from_gmail,
+        args.gmail_only,
+        args.preview,
     ))
 
 

@@ -1,8 +1,8 @@
 """
-Email Priority Classification environment for verifiers.
+Email Category Classification environment for verifiers.
 
-Single-turn: model receives an email, outputs a priority classification
-(P1-P4) with rationale in XML format.
+Single-turn: model receives an email, outputs a category classification
+with rationale in XML format.
 """
 
 import json
@@ -14,22 +14,21 @@ from datasets import Dataset
 DATA_PATH = Path(__file__).resolve().parent / "data" / "synthetic_emails.jsonl"
 
 SYSTEM_PROMPT = """\
-You are an email priority classifier. Given an email, classify it into \
-exactly one priority tier:
+You are an email classifier. Given an email, classify it into \
+exactly one of these categories:
 
-P1 — Urgent / Action Required Now (blocking, time-critical, incidents, \
-urgent requests from leadership or key clients)
-P2 — Important / Action Required Soon (needs response in 1-2 business days, \
-meaningful work requests, stakeholder asks)
-P3 — Low Priority / Can Wait (FYI, optional meetings, informational, \
-can defer a week)
-P4 — Noise / No Action Needed (automated notifications, marketing, spam, \
-mass CCs, no action required)
+todo_tasks — Direct asks to do something — tasks, deliverables, approvals
+meeting_coordination — Scheduling, rescheduling, agenda sharing, meeting follow-ups
+newsletter_information — Internal or external newsletters, digests, roundups
+important_alert — Notifications requiring immediate action (security codes, login alerts, password resets)
+general — Personal emails landing in work inbox — family, friends, side projects
+transactional — Receipts, order confirmations, subscription notices
+jobs — Job related emails, updates, offers, application notifications
 
-Think carefully about the urgency, who sent it, and what action is needed. \
+Think carefully about the email's purpose, sender, and required action. \
 Then respond with EXACTLY this XML format:
 
-<priority>P1</priority>
+<category>todo_tasks</category>
 <rationale>Your reasoning here</rationale>
 
 Respond with ONLY the XML tags above. No other text."""
@@ -52,7 +51,7 @@ def load_environment(
     data_path: str | None = None,
     train_ratio: float = 0.8,
 ) -> vf.Environment:
-    """Load the email priority classification environment.
+    """Load the email category classification environment.
 
     Args:
         split: "train" or "eval"
@@ -64,7 +63,7 @@ def load_environment(
     if not path.exists():
         raise FileNotFoundError(
             f"Dataset not found at {path}. "
-            "Run `python scripts/generate_synthetic_emails.py` first."
+            "Run `python scripts/generate_synthetic_emails.py --gmail-only` first."
         )
 
     raw = _load_jsonl(path)
@@ -84,7 +83,7 @@ def load_environment(
         [
             {
                 "question": item["email_text"],
-                "answer": item["priority"],
+                "answer": item["category"],
             }
             for item in items
         ]
@@ -96,14 +95,14 @@ def load_environment(
         [
             {
                 "question": item["email_text"],
-                "answer": item["priority"],
+                "answer": item["category"],
             }
             for item in eval_items
         ]
     )
 
-    # Reward: exact match on priority
-    parser = vf.XMLParser(fields=["priority", "rationale"])
+    # Reward: exact match on category
+    parser = vf.XMLParser(fields=["category", "rationale"])
 
     def _get_text(completion) -> str:
         if isinstance(completion, list):
@@ -115,14 +114,13 @@ def load_environment(
 
     async def exact_match(completion, answer, parser) -> float:
         parsed = parser.parse(_get_text(completion))
-        if parsed.priority and parsed.priority.strip().upper() == answer.strip().upper():
+        if parsed.category and parsed.category.strip().lower() == answer.strip().lower():
             return 1.0
         return 0.0
 
     async def rationale_quality(completion, parser) -> float:
         parsed = parser.parse(_get_text(completion))
         rationale = parsed.rationale or ""
-        # Simple heuristic: reward having a non-trivial rationale
         word_count = len(rationale.split())
         if word_count >= 10:
             return 1.0

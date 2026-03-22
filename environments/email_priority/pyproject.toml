@@ -1,6 +1,6 @@
 [project]
 name = "email-priority"
-description = "Email priority classification (P1-P4) environment for RL training"
+description = "Email category classification (7 categories) environment for RL training"
 tags = ["single-turn", "classification", "email", "train", "eval"]
 version = "0.1.0"
 requires-python = ">=3.10"
