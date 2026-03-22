@@ -1,0 +1,5 @@
+
+# outputs from `prime eval run`
+./outputs
+./environments/*/outputs
+.venv
