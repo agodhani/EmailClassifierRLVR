@@ -1,0 +1,32 @@
+model = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+max_steps = 200
+batch_size = 128
+rollouts_per_example = 8
+
+[sampling]
+max_tokens = 512
+
+[[env]]
+id = "email-priority"
+
+# Optional: W&B logging
+# [wandb]
+# project = "email-priority"
+# name = "qwen3-30b-email-priority"
+
+# Optional: online evaluation
+# [eval]
+# interval = 50
+# num_examples = 50
+# rollouts_per_example = 1
+# eval_base_model = true
+#
+# [[eval.env]]
+# id = "email-priority"
+# args = { split = "eval" }
+
+# Optional: validation during training
+# [val]
+# num_examples = 50
+# rollouts_per_example = 1
+# interval = 10
