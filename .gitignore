@@ -3,3 +3,5 @@
 ./outputs
 ./environments/*/outputs
 .venv
+credentials.json
+token.json
