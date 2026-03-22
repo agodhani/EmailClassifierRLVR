@@ -1,0 +1,25 @@
+# Baseline survey — one pass through all training emails, no real learning intended.
+# batch_size=1 means one email per step, so per-step rewards = per-email accuracy.
+# max_steps=107 = one full pass through the dataset (85 train + buffer for repeats).
+
+model = "meta-llama/Llama-3.2-1B-Instruct"
+max_steps = 107
+batch_size = 1
+rollouts_per_example = 1
+
+[sampling]
+max_tokens = 512
+
+[[env]]
+id = "lostzoro003/email-priority"
+args = { split = "train", num_examples = -1 }   # use all training emails
+
+# Validation on held-out eval split (~21 emails) at start and end.
+[val]
+num_examples = 21
+rollouts_per_example = 1
+interval = 107              # only at step 0 and end
+
+# [wandb]
+# project = "email-priority"
+# name = "llama-1b-baseline-survey"

@@ -11,7 +11,7 @@ from pathlib import Path
 import verifiers as vf
 from datasets import Dataset
 
-DATA_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "synthetic_emails.jsonl"
+DATA_PATH = Path(__file__).resolve().parent / "data" / "synthetic_emails.jsonl"
 
 SYSTEM_PROMPT = """\
 You are an email priority classifier. Given an email, classify it into \
@@ -105,14 +105,22 @@ def load_environment(
     # Reward: exact match on priority
     parser = vf.XMLParser(fields=["priority", "rationale"])
 
+    def _get_text(completion) -> str:
+        if isinstance(completion, list):
+            return next(
+                (m["content"] for m in reversed(completion) if m.get("role") == "assistant"),
+                "",
+            )
+        return completion or ""
+
     async def exact_match(completion, answer, parser) -> float:
-        parsed = parser.parse(completion)
+        parsed = parser.parse(_get_text(completion))
         if parsed.priority and parsed.priority.strip().upper() == answer.strip().upper():
             return 1.0
         return 0.0
 
     async def rationale_quality(completion, parser) -> float:
-        parsed = parser.parse(completion)
+        parsed = parser.parse(_get_text(completion))
         rationale = parsed.rationale or ""
         # Simple heuristic: reward having a non-trivial rationale
         word_count = len(rationale.split())
