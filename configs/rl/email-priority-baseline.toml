@@ -2,13 +2,13 @@
 # batch_size=1 means one email per step, so per-step rewards = per-email accuracy.
 # max_steps=164 = one full pass through the train split (80% of 205 emails).
 
-model = "meta-llama/Llama-3.2-1B-Instruct"
+model = "nvidia/OpenReasoning-Nemotron-7B"
 max_steps = 164
 batch_size = 1
 rollouts_per_example = 1
 
 [sampling]
-max_tokens = 512
+max_tokens = 2048
 
 [[env]]
 id = "lostzoro003/email-priority"

@@ -1,10 +1,10 @@
-model = "meta-llama/Llama-3.2-1B-Instruct"
+model = "nvidia/OpenReasoning-Nemotron-7B"
 max_steps = 50
 batch_size = 128
 rollouts_per_example = 8
 
 [sampling]
-max_tokens = 512
+max_tokens = 2048
 
 [[env]]
 id = "lostzoro003/email-priority"             # replace with your Prime Hub slug after: prime env push --path ./environments/email_priority

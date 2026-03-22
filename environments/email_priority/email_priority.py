@@ -128,8 +128,7 @@ def load_environment(
             return 0.5
         return 0.0
 
-    rubric = vf.Rubric(funcs=[exact_match], weights=[1.0], parser=parser)
-    rubric.add_metric(rationale_quality)
+    rubric = vf.Rubric(funcs=[exact_match, rationale_quality], weights=[10.0, 1.0], parser=parser)
 
     return vf.SingleTurnEnv(
         dataset=dataset,
