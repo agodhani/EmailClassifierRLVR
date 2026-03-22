@@ -8,8 +8,10 @@ with rationale in XML format.
 import json
 from pathlib import Path
 
+import sacrebleu as sb
 import verifiers as vf
 from datasets import Dataset
+from rouge_score import rouge_scorer as rouge_lib
 
 DATA_PATH = Path(__file__).resolve().parent / "data" / "synthetic_emails.jsonl"
 
@@ -128,7 +130,29 @@ def load_environment(
             return 0.5
         return 0.0
 
-    rubric = vf.Rubric(funcs=[exact_match, rationale_quality], weights=[10.0, 1.0], parser=parser)
+    async def format_quality(completion, parser) -> float:
+        parsed = parser.parse(_get_text(completion))
+        if parsed.category and parsed.rationale:
+            return 2.0
+        return 0.0
+    
+    async def rouge_rationale(completion, question, parser) -> float:
+        rationale = parser.parse(_get_text(completion)).rationale or ""
+        if not rationale:
+            return 0.0
+        scorer = rouge_lib.RougeScorer(["rougeL"], use_stemmer=True)
+        return float(scorer.score(question, rationale)["rougeL"].fmeasure)
+
+    async def bleu_rationale(completion, question, parser) -> float:
+        rationale = parser.parse(_get_text(completion)).rationale or ""
+        if not rationale:
+            return 0.0
+        score = sb.sentence_bleu(rationale, [question])
+        return float(score.score) / 100.0  # normalize 0–100 → 0–1
+
+    rubric = vf.Rubric(funcs=[exact_match, rationale_quality, format_quality], weights=[10.0, 1.0, 2.0], parser=parser)
+    rubric.add_metric(rouge_rationale)
+    rubric.add_metric(bleu_rationale)
 
     return vf.SingleTurnEnv(
         dataset=dataset,

@@ -10,10 +10,14 @@ Train an LLM to classify emails into P1–P4 priority tiers using RLVR.
 # 1. Build dataset from Gmail data already in email-data-raw/
 cd scripts && uv run python generate_synthetic_emails.py --gmail-only
 
+#1.5 (if updates)
+prime env push --path ./environments/email_priority                                                                             
+
 # 2. Install the environment
 prime env install email-priority
 
-# 3. Baseline survey (free — uses training infra, see note below)
+
+# 3. Baseline survey (free — uses training infra, see note below) (just dont run this it doesnt work)
 prime rl run configs/rl/email-priority-baseline.toml
 
 # 4. Train

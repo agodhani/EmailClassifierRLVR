@@ -14,6 +14,7 @@ CATEGORIES = [
     "general",
     "transactional",
     "jobs",
+    "spam"
 ]
 
 CATEGORY_DESCRIPTIONS = {
@@ -24,6 +25,7 @@ CATEGORY_DESCRIPTIONS = {
     "general": "Personal emails landing in work inbox — family, friends, side projects",
     "transactional": "Receipts, order confirmations, subscription notices",
     "jobs": "Job related emails, updates, offers notifications",
+    "spam": "Unsolicited or irrelevant emails, often promotional or scam in nature"
 }
 
 # ── Target distribution per category ──────────────────────────────
